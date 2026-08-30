@@ -41,6 +41,35 @@ class FlaskRouteTests(unittest.TestCase):
         resp = self.client.post("/download", json={})
         self.assertEqual(resp.status_code, 400)
 
+    def test_test_post_hides_exception_details(self):
+        from unittest.mock import patch
+
+        import app as app_module
+
+        with patch.object(app_module, "read_headers_from_file", return_value={}), patch.object(
+            app_module.downloader, "get_video_info", side_effect=RuntimeError("secret traceback details")
+        ):
+            resp = self.client.get("/test_post/abc")
+        self.assertEqual(resp.status_code, 500)
+        payload = resp.get_json()
+        self.assertEqual(payload["error"], "An internal error has occurred")
+        self.assertNotIn("secret traceback details", resp.get_data(as_text=True))
+
+    def test_test_post_hides_lookup_error_details(self):
+        from unittest.mock import patch
+
+        import app as app_module
+
+        with patch.object(app_module, "read_headers_from_file", return_value={}), patch.object(
+            app_module.downloader,
+            "get_video_info",
+            return_value=(None, None, "HTTPSConnectionPool secret"),
+        ):
+            resp = self.client.get("/test_post/abc")
+        self.assertEqual(resp.status_code, 400)
+        self.assertNotIn("HTTPSConnectionPool", resp.get_data(as_text=True))
+        self.assertEqual(resp.get_json()["error"], "Post is unavailable or has no video")
+
 
 if __name__ == "__main__":
     unittest.main()

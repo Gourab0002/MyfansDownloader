@@ -73,10 +73,9 @@ def start_download():
                 post_id=post_id,
                 resolution=resolution,
             )
-        except Exception as exc:
-            error = f"Error in download thread: {exc}"
-            logger.exception(error)
-            progress_queue.put(error)
+        except Exception:
+            logger.exception("Error in download thread")
+            progress_queue.put("Download failed. Check the server log for details.")
             progress_queue.put("DONE")
         finally:
             download_lock.release()
@@ -117,7 +116,8 @@ def test_post(post_id):
         headers = read_headers_from_file("header.txt")
         data, resolution_info, error = downloader.get_video_info(post_id, session, headers)
         if error:
-            return jsonify({"error": error}), 400
+            logger.warning("Post lookup failed for %s: %s", post_id, error)
+            return jsonify({"error": "Post is unavailable or has no video"}), 400
         return jsonify(
             {
                 "post_type": "video"
@@ -132,8 +132,9 @@ def test_post(post_id):
                 "created_at": data.get("published_at") or data.get("created_at", ""),
             }
         )
-    except Exception as exc:
-        return jsonify({"error": str(exc)}), 500
+    except Exception:
+        logger.exception("Unexpected error looking up post %s", post_id)
+        return jsonify({"error": "An internal error has occurred"}), 500
 
 
 @app.route("/settings", methods=["GET", "POST"])
