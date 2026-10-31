@@ -109,13 +109,13 @@ def process_image_post(
         if not post_is_available(data):
             emit(progress_queue, f"No access to image post {post_id}", "error")
             if download_state:
-                download_state.mark_failed(post_id, "no access")
+                download_state.mark_failed(post_id, "no access", kind="images")
             return "failed"
         urls = collect_image_urls(data)
         if not urls:
             emit(progress_queue, f"No images found for post {post_id}", "error")
             if download_state:
-                download_state.mark_failed(post_id, "no images")
+                download_state.mark_failed(post_id, "no images", kind="images")
             return "failed"
         username = (data.get("user") or {}).get("username") or "unknown"
         folder = os.path.join(output_dir, username, "images")
@@ -149,7 +149,7 @@ def process_image_post(
             return "stopped"
         emit(progress_queue, f"Error downloading images for post {post_id}: {exc}", "error")
         if download_state:
-            download_state.mark_failed(post_id, str(exc))
+            download_state.mark_failed(post_id, str(exc), kind="images")
         return "failed"
 
 
@@ -180,7 +180,7 @@ def process_video_post(
         if not post_is_available(data):
             emit(progress_queue, f"No access to post {post_id}", "error")
             if download_state:
-                download_state.mark_failed(post_id, "no access")
+                download_state.mark_failed(post_id, "no access", kind="videos", resolution=selected_resolution)
             return "failed"
         try:
             video_payload = client.get_post_videos(post_id)
@@ -192,7 +192,7 @@ def process_video_post(
         if not chosen:
             emit(progress_queue, f"No video URL for post {post_id} (locked or unavailable)", "error")
             if download_state:
-                download_state.mark_failed(post_id, "no video url")
+                download_state.mark_failed(post_id, "no video url", kind="videos", resolution=selected_resolution)
             return "failed"
 
         username = (data.get("user") or {}).get("username") or "unknown"
@@ -239,14 +239,14 @@ def process_video_post(
             return "saved"
         emit(progress_queue, f"Failed to download video for post {post_id}", "error")
         if download_state:
-            download_state.mark_failed(post_id, "download failed")
+            download_state.mark_failed(post_id, "download failed", kind="videos", resolution=selected_resolution)
         return "failed"
     except Exception as exc:
         if _stopped(cancel_event):
             return "stopped"
         emit(progress_queue, f"Error processing post {post_id}: {exc}", "error")
         if download_state:
-            download_state.mark_failed(post_id, str(exc))
+            download_state.mark_failed(post_id, str(exc), kind="videos", resolution=selected_resolution)
         return "failed"
 
 
@@ -351,6 +351,7 @@ def download_videos_concurrently(
     download_state=None,
     headers=None,
     cancel_event=None,
+    summary=None,
 ) -> bool:
     headers = headers or read_headers_from_file("header.txt")
     shared = MyFansClient(headers=headers, session=session)
@@ -377,6 +378,7 @@ def download_videos_concurrently(
     stopped = _drive_posts(
         post_ids, run_one, tally, workers, cancel_event, progress_queue, "Downloading videos"
     )
+    _merge_summary(summary, tally.counts, stopped)
     if not stopped:
         emit(progress_queue, "Download process completed")
     return stopped
@@ -392,6 +394,7 @@ def download_images_concurrently(
     max_workers=1,
     headers=None,
     cancel_event=None,
+    summary=None,
 ) -> bool:
     headers = headers or read_headers_from_file("header.txt")
     shared = MyFansClient(headers=headers, session=session)
@@ -417,9 +420,19 @@ def download_images_concurrently(
     stopped = _drive_posts(
         post_ids, run_one, tally, workers, cancel_event, progress_queue, "Downloading images"
     )
+    _merge_summary(summary, tally.counts, stopped)
     if not stopped:
         emit(progress_queue, "Image download process completed")
     return stopped
+
+
+def _merge_summary(summary, counts, stopped: bool) -> None:
+    if summary is None:
+        return
+    for key in ("done", "total", "skipped", "saved", "failed"):
+        summary[key] = int(summary.get(key) or 0) + int(counts.get(key) or 0)
+    if stopped:
+        summary["stopped"] = True
 
 
 def download_single_file(session, post_id, selected_resolution, output_dir, filename_config):
@@ -541,6 +554,29 @@ def preview_target(
     }
 
 
+def _empty_summary() -> Dict[str, Any]:
+    return {
+        "stopped": False,
+        "failed": 0,
+        "saved": 0,
+        "skipped": 0,
+        "done": 0,
+        "total": 0,
+        "error": False,
+        "message": "",
+    }
+
+
+def _record_one(summary: Dict[str, Any], status: str) -> None:
+    summary["total"] = int(summary.get("total") or 0) + 1
+    if status == "stopped":
+        summary["stopped"] = True
+        return
+    summary["done"] = int(summary.get("done") or 0) + 1
+    key = status if status in {"skipped", "saved", "failed"} else "failed"
+    summary[key] = int(summary.get(key) or 0) + 1
+
+
 def start_download(
     username,
     post_type,
@@ -550,7 +586,9 @@ def start_download(
     post_id=None,
     resolution="best",
     cancel_event=None,
+    retry_items=None,
 ):
+    summary = _empty_summary()
     stopped = False
     try:
         config = load_config()
@@ -569,6 +607,62 @@ def start_download(
         client = MyFansClient(headers=headers, session=session)
         workers = thread_count(config)
         resolution = normalize_resolution(resolution or "best")
+
+        if retry_items:
+            grouped: Dict[tuple, List[str]] = {}
+            order = []
+            for item in retry_items:
+                item_id = str((item or {}).get("post_id") or "").strip()
+                if not item_id:
+                    continue
+                kind = item.get("kind") if item.get("kind") in {"videos", "images"} else "videos"
+                item_resolution = normalize_resolution(item.get("resolution") or "best")
+                key = (kind, item_resolution)
+                if key not in grouped:
+                    grouped[key] = []
+                    order.append(key)
+                grouped[key].append(item_id)
+            if not order:
+                emit(progress_queue, "No failed posts to retry.", "warning")
+                summary["error"] = True
+                summary["message"] = "No failed posts to retry."
+            else:
+                emit(progress_queue, f"Retrying {sum(len(ids) for ids in grouped.values())} failed posts")
+                for kind, item_resolution in order:
+                    if _stopped(cancel_event):
+                        stopped = True
+                        break
+                    ids = grouped[(kind, item_resolution)]
+                    if kind == "images":
+                        stopped = download_images_concurrently(
+                            session,
+                            ids,
+                            output_dir,
+                            filename_config,
+                            progress_queue,
+                            download_state=download_state,
+                            max_workers=workers,
+                            headers=headers,
+                            cancel_event=cancel_event,
+                            summary=summary,
+                        )
+                    else:
+                        stopped = download_videos_concurrently(
+                            session,
+                            ids,
+                            item_resolution,
+                            output_dir,
+                            filename_config,
+                            progress_queue,
+                            max_workers=workers,
+                            download_state=download_state,
+                            headers=headers,
+                            cancel_event=cancel_event,
+                            summary=summary,
+                        )
+                    if stopped:
+                        break
+            return summary
 
         if post_id:
             emit(progress_queue, f"Starting download for post ID: {post_id}")
@@ -596,22 +690,27 @@ def start_download(
                 )
             if status == "stopped":
                 stopped = True
-            else:
-                summary = {"done": 1, "total": 1, "skipped": 0, "saved": 0, "failed": 0}
-                if status in summary:
-                    summary[status] = 1
-                else:
-                    summary["failed"] = 1
-                emit_progress(progress_queue, **summary)
-            return
+            _record_one(summary, status)
+            emit_progress(
+                progress_queue,
+                done=summary["done"],
+                total=summary["total"],
+                skipped=summary["skipped"],
+                saved=summary["saved"],
+                failed=summary["failed"],
+                stopped=summary["stopped"],
+            )
+            return summary
 
         if not username:
             emit(progress_queue, "Error: username is required for bulk downloads", "error")
-            return
+            summary["error"] = True
+            summary["message"] = "Enter a creator name."
+            return summary
 
         if _stopped(cancel_event):
             stopped = True
-            return
+            return summary
 
         emit(progress_queue, f"Starting download for user: {username}, type: {post_type}, mode: {download_type}")
         try:
@@ -620,12 +719,15 @@ def start_download(
             status = getattr(exc.response, "status_code", None)
             if status in (401, 403):
                 emit(progress_queue, "API returned 401/403. Check the token in header.txt.", "error")
-                return
+                summary["error"] = True
+                summary["message"] = "The token was rejected."
+                return summary
             raise
         user_id = user.get("id")
         if not user_id:
             emit(progress_queue, "Failed to retrieve user ID. Check the username and token.", "error")
-            return
+            summary["error"] = True
+            return summary
         emit(progress_queue, f"Found user ID: {user_id}")
 
         kind = "image" if post_type == "images" else "video"
@@ -633,13 +735,13 @@ def start_download(
         posts = _list_posts(client, user, kind, cancel_event=cancel_event)
         if _stopped(cancel_event):
             stopped = True
-            return
+            return summary
         posts = _filter_posts(posts, download_type)
         emit(progress_queue, f"Total {kind} posts matched: {len(posts)}")
         post_ids = [post.get("id") for post in posts if post.get("id")]
         if not post_ids:
             emit(progress_queue, "No posts match the selected criteria.")
-            return
+            return summary
         if kind == "video":
             stopped = download_videos_concurrently(
                 session,
@@ -652,6 +754,7 @@ def start_download(
                 download_state=download_state,
                 headers=headers,
                 cancel_event=cancel_event,
+                summary=summary,
             )
         else:
             stopped = download_images_concurrently(
@@ -664,17 +767,21 @@ def start_download(
                 max_workers=workers,
                 headers=headers,
                 cancel_event=cancel_event,
+                summary=summary,
             )
     except Exception as exc:
         if _stopped(cancel_event):
             stopped = True
         else:
+            summary["error"] = True
             emit(progress_queue, f"Error: {exc}", "error")
     finally:
-        if stopped:
+        if stopped or _stopped(cancel_event):
+            summary["stopped"] = True
             emit(progress_queue, "Stopped.")
         if progress_queue is not None:
             progress_queue.put("DONE")
+    return summary
 
 
 def _prompt_resolution() -> str:

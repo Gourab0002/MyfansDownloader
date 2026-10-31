@@ -219,21 +219,28 @@ def check_ffmpeg_installed():
         return False
 
     try:
-        ffmpeg_url = _get_latest_ffmpeg_url()
-        print(f"Latest FFmpeg URL: {ffmpeg_url}")
-        _download_ffmpeg_zip(ffmpeg_url, "ffmpeg.zip")
-        extracted_folder = _unzip_ffmpeg()
-        bin_folder = _find_bin_folder(extracted_folder)
-        if not bin_folder:
-            print("Failed to find the FFmpeg bin directory.")
-            return False
-        print(f"Found bin folder at: {bin_folder}")
-        _add_to_path_env(bin_folder)
-        return _is_ffmpeg_installed()
+        return install_windows_ffmpeg()
     except Exception as exc:
         print(f"Automatic FFmpeg install failed: {exc}")
         _print_ffmpeg_help()
         return False
+
+
+def install_windows_ffmpeg() -> bool:
+    """Download a Windows FFmpeg build and add it to the user PATH."""
+    if os.name != "nt":
+        return False
+    ffmpeg_url = _get_latest_ffmpeg_url()
+    print(f"Latest FFmpeg URL: {ffmpeg_url}")
+    _download_ffmpeg_zip(ffmpeg_url, "ffmpeg.zip")
+    extracted_folder = _unzip_ffmpeg()
+    bin_folder = _find_bin_folder(extracted_folder)
+    if not bin_folder:
+        print("Failed to find the FFmpeg bin directory.")
+        return False
+    print(f"Found bin folder at: {bin_folder}")
+    _add_to_path_env(bin_folder)
+    return _is_ffmpeg_installed()
 
 
 if __name__ == "__main__":

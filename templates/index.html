@@ -64,7 +64,7 @@
         </div>
         <p class="hint">Files go to <span id="savePath">downloads</span></p>
         <p class="hint" id="tokenHint" hidden>Paid posts need a token. Add it in Settings.</p>
-        <p class="hint" id="ffmpegNote" hidden>FFmpeg is not available, so videos cannot be saved yet.</p>
+        <p class="hint" id="ffmpegNote" hidden>FFmpeg is not available, so videos cannot be saved yet. <button type="button" class="text" id="installFfmpeg" hidden>Install FFmpeg</button></p>
     </form>
 
     <section class="panel activity" aria-labelledby="activityTitle">
@@ -73,7 +73,10 @@
                 <h2 id="activityTitle">Activity</h2>
                 <p id="historyNote"></p>
             </div>
-            <span class="state" id="jobState" data-state="idle">Idle</span>
+            <div class="activity-actions">
+                <button type="button" class="text" id="retryFailed" hidden>Retry failed</button>
+                <span class="state" id="jobState" data-state="idle">Idle</span>
+            </div>
         </div>
         <div id="jobProgress" class="job-progress" hidden>
             <div class="bar" aria-hidden="true"><span id="jobBar"></span></div>
@@ -88,6 +91,13 @@
         <h2 id="libraryTitle">Library</h2>
         <button type="button" class="text" id="refreshLibrary">Refresh</button>
     </div>
-    <ul id="libraryList" class="library-list"></ul>
+    <label class="field-label" for="librarySearch">Search</label>
+    <input id="librarySearch" class="library-search" type="search" autocomplete="off" spellcheck="false" placeholder="Creator or file name">
+    <div id="libraryList"></div>
+    <div class="pager" id="libraryPager" hidden>
+        <button type="button" class="ghost" id="libraryPrev">Previous</button>
+        <span id="libraryPage"></span>
+        <button type="button" class="ghost" id="libraryNext">Next</button>
+    </div>
 </section>
 {% endblock %}

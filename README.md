@@ -15,7 +15,9 @@ Download videos and images from [myfans.jp](https://myfans.jp) that your account
 - [FFmpeg](https://ffmpeg.org/) on your `PATH` (needed for videos)
 - A MyFans account token for paid or members-only posts (optional for free/public posts)
 
-On Windows you can run `SETUP.bat` once to install Python and dependencies, then `MyfansDownloader.bat` to start.
+On Windows, double-click `MyfansDownloader.bat` or `MyfansDownloader.vbs`. The browser opens the downloader. Run `SETUP.bat` once first if Python is not installed yet.
+
+The page still opens when FFmpeg is missing. Videos need FFmpeg; on Windows the page can install it. Images do not need it.
 
 ## Set your token
 
@@ -23,7 +25,7 @@ Paid and members-only posts need the `_mfans_token` cookie from myfans.jp after 
 
 1. Open [myfans.jp](https://myfans.jp) and log in.
 2. In browser DevTools, copy `_mfans_token`.
-3. Put it in `header.txt` in the project folder (CLI) or in `config/header.txt` (Docker):
+3. Put it in `header.txt` in the project folder, or paste it on the Settings page. Docker reads `config/header.txt`:
 
 ```
 authorization: Token token=YOUR_TOKEN_HERE
@@ -45,18 +47,18 @@ From the project folder:
 
 ```bash
 pip install -r requirements.txt
-python main.py
+python MyfansDownloader_unified.py web
 ```
 
-`MyfansDownloader_unified.py` is the same menu with an extra CLI / web choice.
+That opens the same browser page as the Windows launcher, at http://127.0.0.1:5000. Run `python MyfansDownloader_unified.py` with no arguments for the text menu.
 
 | Option | What it does |
 | --- | --- |
+| Web page | Check a creator or one post, then download. Stop a running job, see how many posts are done, and retry posts that failed. |
 | Download videos | All posts for a creator, a single post ID, or a list of IDs. Quality is selectable. |
 | Download images | All image posts for a creator. |
-| Web interface | Browser UI at http://127.0.0.1:5000 |
 
-Downloads go to `downloads/<creator>/videos` or `downloads/<creator>/images` by default. Filenames and the output folder are set in `config.ini`.
+The library groups saved files by creator, searches them, and opens a file only from the save folder. Downloads go to `downloads/<creator>/videos` or `downloads/<creator>/images` by default. Filenames and the output folder are set in `config.ini`.
 
 ## Docker usage
 
@@ -97,9 +99,9 @@ docker run -it \
 | JSON metadata | `WRITE_METADATA` (`1` / `0`) | `0` |
 | Auth token | `header.txt` or `AUTH_TOKEN` | empty |
 
-Filename placeholders: `{creator}`, `{date}`, `{id}`, `{title}`.
+Filename placeholders: `{creator}`, `{date}`, `{id}`, `{title}`. The notes in `config.ini` explain each one.
 
-The web **Settings** page updates the token, filename pattern, and thread count without wiping the rest of `config.ini`.
+The token is stored in `header.txt` only. Settings can change the filename pattern, thread count, and save folder, and it leaves those notes in place.
 
 ## Tests
 

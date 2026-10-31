@@ -79,18 +79,53 @@ class DownloadState:
                 self.state["downloads"][post_id]["status"] = "completed"
                 self.state["downloads"][post_id]["last_updated"] = datetime.now().isoformat()
             self.state["completed_files"].add(post_id)
+            failed = self.state.get("failed_files")
+            if isinstance(failed, dict):
+                failed.pop(post_id, None)
             self.save_state()
 
-    def mark_failed(self, post_id, error):
+    def mark_failed(self, post_id, error, kind=None, resolution=None):
         with self._lock:
             post_id = str(post_id)
-            self.state["downloads"][post_id] = {
+            entry = {
                 "status": "failed",
                 "error": str(error),
                 "last_updated": datetime.now().isoformat(),
             }
+            if kind in {"videos", "images"}:
+                entry["kind"] = kind
+            if resolution:
+                entry["resolution"] = str(resolution)
+            self.state["downloads"][post_id] = entry
             self.state["failed_files"][post_id] = str(error)
             self.save_state()
+
+    def failed_posts(self):
+        with self._lock:
+            failed = self.state.get("failed_files") or {}
+            if not isinstance(failed, dict):
+                return []
+            completed = self.state.get("completed_files") or set()
+            items = []
+            for post_id, error in failed.items():
+                post_id = str(post_id)
+                if post_id in completed:
+                    continue
+                entry = (self.state.get("downloads") or {}).get(post_id) or {}
+                if not isinstance(entry, dict):
+                    entry = {}
+                kind = entry.get("kind")
+                if kind not in {"videos", "images"}:
+                    kind = "images" if "image" in str(error).lower() else "videos"
+                items.append(
+                    {
+                        "post_id": post_id,
+                        "error": str(error),
+                        "kind": kind,
+                        "resolution": str(entry.get("resolution") or "best"),
+                    }
+                )
+            return items
 
     def is_completed(self, post_id) -> bool:
         with self._lock:

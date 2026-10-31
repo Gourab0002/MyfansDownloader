@@ -13,9 +13,17 @@ if str(ROOT) not in sys.path:
 import threading
 import time
 
-from MyfansDownloader_unified import _run_cli_entry
+from MyfansDownloader_unified import _run_cli_entry, _web_requested
 from scripts.hls import _popen_until
 from scripts.utils import post_is_available
+
+
+class WebLaunchTests(unittest.TestCase):
+    def test_web_launch_does_not_require_ffmpeg_first(self):
+        self.assertTrue(_web_requested(["web"]))
+        self.assertTrue(_web_requested(["--web"]))
+        self.assertFalse(_web_requested([]))
+        self.assertFalse(_web_requested(["--cli"]))
 
 
 class StartDownloadDoneTests(unittest.TestCase):

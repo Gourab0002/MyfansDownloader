@@ -1,6 +1,7 @@
 from flask import Flask, Response, jsonify, render_template, request
 import json
 import logging
+import math
 import os
 import subprocess
 import sys
@@ -13,6 +14,7 @@ from urllib.parse import urlparse
 import requests
 
 import scripts.myfans_dl as downloader
+from helpers import deps as helper_deps
 from scripts.api import has_auth_token, read_headers_from_file, write_auth_token
 from scripts.download_state import DownloadState
 from scripts.paths import ensure_dir, log_file_path
@@ -33,7 +35,12 @@ progress_queue = Queue()
 download_state = DownloadState()
 download_lock = threading.Lock()
 cancel_event = threading.Event()
+ffmpeg_lock = threading.Lock()
+job_notice_lock = threading.Lock()
+job_notice = {"state": "idle", "message": "", "progress": ""}
 MEDIA_EXTENSIONS = {".mp4", ".m4v", ".mov", ".webm", ".mkv", ".jpg", ".jpeg", ".png", ".webp", ".gif"}
+LIBRARY_PAGE_SIZE = 16
+LIBRARY_SCAN_LIMIT = 5000
 
 
 def ffmpeg_available() -> bool:
@@ -50,17 +57,87 @@ def ffmpeg_available() -> bool:
         return False
 
 
-def reveal_folder(path: Path) -> None:
-    folder = str(path)
+def reveal_path(path: Path) -> None:
+    target = str(path)
     if os.name == "nt":
-        os.startfile(folder)  # type: ignore[attr-defined]
+        os.startfile(target)  # type: ignore[attr-defined]
         return
-    command = ["open", folder] if sys.platform == "darwin" else ["xdg-open", folder]
+    command = ["open", target] if sys.platform == "darwin" else ["xdg-open", target]
     subprocess.Popen(command)
 
 
-def list_library(limit: int = 16) -> list:
-    root = Path(output_directory(load_config())).resolve()
+def reveal_folder(path: Path) -> None:
+    reveal_path(path)
+
+
+def _set_job(state: str, message: str, progress: str = "") -> None:
+    with job_notice_lock:
+        job_notice["state"] = state
+        job_notice["message"] = message
+        job_notice["progress"] = progress
+
+
+def _job_payload() -> dict:
+    with job_notice_lock:
+        payload = dict(job_notice)
+    payload["running"] = download_lock.locked()
+    if payload["running"]:
+        payload["state"] = "running"
+        if not payload["message"]:
+            payload["message"] = "Download in progress."
+    return payload
+
+
+def _finish_job(summary: dict) -> None:
+    summary = summary or {}
+    failed = int(summary.get("failed") or 0)
+    saved = int(summary.get("saved") or 0)
+    if summary.get("stopped"):
+        _set_job("stopped", "Stopped.")
+        return
+    if failed and saved:
+        noun = "post" if failed == 1 else "posts"
+        _set_job("error", f"Finished. {failed} {noun} failed.")
+        return
+    if failed:
+        noun = "post" if failed == 1 else "posts"
+        _set_job("error", f"{failed} {noun} failed.")
+        return
+    if summary.get("error"):
+        _set_job("error", str(summary.get("message") or "Download failed."))
+        return
+    _set_job("done", "Download finished.")
+
+
+def _spawn_download(target) -> bool:
+    if not download_lock.acquire(blocking=False):
+        return False
+    cancel_event.clear()
+
+    def runner():
+        _set_job("running", "Download in progress.")
+        summary = {"error": True, "stopped": False, "failed": 1, "saved": 0, "message": "Download failed."}
+        try:
+            result = target()
+            if isinstance(result, dict):
+                summary = result
+        except Exception:
+            logger.exception("Error in download thread")
+            progress_queue.put("Download failed. Check the server log for details.")
+            progress_queue.put("DONE")
+        finally:
+            _finish_job(summary)
+            download_lock.release()
+
+    threading.Thread(target=runner, daemon=True).start()
+    return True
+
+
+def _library_root() -> Path:
+    return Path(output_directory(load_config())).resolve()
+
+
+def _scan_library(root: Path) -> list:
     found = []
     if not root.is_dir():
         return found
@@ -74,23 +151,77 @@ def list_library(limit: int = 16) -> list:
                 continue
             try:
                 stat = path.stat()
-                folder = path.parent.resolve().relative_to(root).as_posix()
+                relative = path.resolve().relative_to(root).as_posix()
             except (OSError, ValueError):
                 continue
+            folder = Path(relative).parent.as_posix()
+            folder = "" if folder == "." else folder
+            creator = "Other files" if not folder else relative.split("/", 1)[0]
             found.append(
                 {
                     "name": path.name,
-                    "folder": "" if folder == "." else folder,
+                    "folder": folder,
+                    "creator": creator,
+                    "path": relative,
                     "size": stat.st_size,
                     "modified": int(stat.st_mtime),
                 }
             )
-            if len(found) >= 200:
-                break
-        if len(found) >= 200:
-            break
-    found.sort(key=lambda item: item["modified"], reverse=True)
-    return found[:limit]
+            if len(found) >= LIBRARY_SCAN_LIMIT:
+                return found
+    return found
+
+
+def list_library(query: str = "", page: int = 1, per_page: int = LIBRARY_PAGE_SIZE) -> dict:
+    files = _scan_library(_library_root())
+    needle = (query or "").strip().lower()[:80]
+    if needle:
+        files = [
+            item
+            for item in files
+            if needle in item["name"].lower()
+            or needle in item["creator"].lower()
+            or needle in item["folder"].lower()
+        ]
+    files.sort(key=lambda item: (item["modified"], item["name"]), reverse=True)
+    per_page = min(max(int(per_page or LIBRARY_PAGE_SIZE), 1), 60)
+    total = len(files)
+    pages = max(1, math.ceil(total / per_page)) if total else 1
+    page = min(max(int(page or 1), 1), pages)
+    visible = files[(page - 1) * per_page : page * per_page]
+    groups = []
+    grouped = {}
+    for item in visible:
+        bucket = grouped.get(item["creator"])
+        if bucket is None:
+            bucket = {"creator": item["creator"], "files": []}
+            grouped[item["creator"]] = bucket
+            groups.append(bucket)
+        bucket["files"].append(item)
+    return {
+        "files": visible,
+        "groups": groups,
+        "page": page,
+        "per_page": per_page,
+        "total": total,
+        "pages": pages,
+        "query": needle,
+    }
+
+
+def _file_inside_library(rel: str):
+    text = (rel or "").strip().replace("\\", "/")
+    if not text or text.startswith("/") or ":" in text or "\x00" in text:
+        return None
+    root = _library_root()
+    candidate = (root / text).resolve()
+    try:
+        candidate.relative_to(root)
+    except ValueError:
+        return None
+    if not candidate.is_file() or candidate.suffix.lower() not in MEDIA_EXTENSIONS:
+        return None
+    return candidate
 
 
 @app.route("/")
@@ -158,9 +289,6 @@ def start_download():
 
     if not post_id and not username:
         return jsonify({"error": "username or post_id is required"}), 400
-    if not download_lock.acquire(blocking=False):
-        return jsonify({"error": "A download is already in progress"}), 409
-    cancel_event.clear()
 
     logger.info(
         "Starting download request - Username: %s, Type: %s, Mode: %s, PostID: %s, Resolution: %s",
@@ -171,26 +299,20 @@ def start_download():
         resolution,
     )
 
-    def download_thread():
-        try:
-            downloader.start_download(
-                username,
-                post_type,
-                download_type,
-                progress_queue,
-                download_state,
-                post_id=post_id,
-                resolution=resolution,
-                cancel_event=cancel_event,
-            )
-        except Exception:
-            logger.exception("Error in download thread")
-            progress_queue.put("Download failed. Check the server log for details.")
-            progress_queue.put("DONE")
-        finally:
-            download_lock.release()
+    def target():
+        return downloader.start_download(
+            username,
+            post_type,
+            download_type,
+            progress_queue,
+            download_state,
+            post_id=post_id,
+            resolution=resolution,
+            cancel_event=cancel_event,
+        )
 
-    threading.Thread(target=download_thread, daemon=True).start()
+    if not _spawn_download(target):
+        return jsonify({"error": "A download is already in progress"}), 409
     return jsonify({"status": "started"})
 
 
@@ -261,14 +383,49 @@ def test_post(post_id):
         return jsonify({"error": "An internal error has occurred"}), 500
 
 
+@app.route("/api/job")
+def job_status():
+    return jsonify(_job_payload())
+
+
+@app.route("/api/retry-failed", methods=["POST"])
+def retry_failed():
+    items = download_state.failed_posts()
+    if not items:
+        return jsonify({"error": "No failed posts to retry."}), 400
+
+    def target():
+        return downloader.start_download(
+            "",
+            "videos",
+            "all",
+            progress_queue,
+            download_state,
+            cancel_event=cancel_event,
+            retry_items=items,
+        )
+
+    if not _spawn_download(target):
+        return jsonify({"error": "A download is already in progress"}), 409
+    return jsonify({"status": "started", "count": len(items)})
+
+
 @app.route("/api/library")
 def library():
-    return jsonify({"files": list_library()})
+    try:
+        page = int(request.args.get("page") or 1)
+    except (TypeError, ValueError):
+        page = 1
+    try:
+        per_page = int(request.args.get("per_page") or LIBRARY_PAGE_SIZE)
+    except (TypeError, ValueError):
+        per_page = LIBRARY_PAGE_SIZE
+    return jsonify(list_library(query=request.args.get("q") or "", page=page, per_page=per_page))
 
 
 @app.route("/api/open-folder", methods=["POST"])
 def open_folder():
-    folder = Path(output_directory(load_config())).resolve()
+    folder = _library_root()
     try:
         ensure_dir(folder)
         reveal_folder(folder)
@@ -276,6 +433,41 @@ def open_folder():
         logger.warning("Could not open downloads folder: %s", exc)
         return jsonify({"error": "Could not open the downloads folder"}), 500
     return jsonify({"status": "opened"})
+
+
+@app.route("/api/open-file", methods=["POST"])
+def open_file():
+    data = request.get_json(silent=True) or {}
+    target = _file_inside_library(str(data.get("path") or ""))
+    if target is None:
+        return jsonify({"error": "That file is not in the save folder."}), 400
+    try:
+        reveal_path(target)
+    except OSError as exc:
+        logger.warning("Could not open a library file: %s", exc)
+        return jsonify({"error": "Could not open that file."}), 500
+    return jsonify({"status": "opened"})
+
+
+@app.route("/api/ffmpeg/install", methods=["POST"])
+def install_ffmpeg_route():
+    if ffmpeg_available():
+        return jsonify({"ffmpeg_available": True, "message": "FFmpeg is already installed."})
+    if os.name != "nt":
+        return jsonify({"error": "Install FFmpeg, then open this app again."}), 400
+    if not ffmpeg_lock.acquire(blocking=False):
+        return jsonify({"error": "FFmpeg install is already running."}), 409
+    try:
+        try:
+            ok = bool(helper_deps.install_windows_ffmpeg())
+        except Exception:
+            logger.exception("FFmpeg install failed")
+            ok = False
+    finally:
+        ffmpeg_lock.release()
+    if not ok or not ffmpeg_available():
+        return jsonify({"error": "FFmpeg could not be installed."}), 500
+    return jsonify({"ffmpeg_available": True, "message": "FFmpeg is ready."})
 
 
 @app.route("/settings", methods=["GET", "POST"])
@@ -317,12 +509,27 @@ def settings_api():
             os.environ["WRITE_METADATA"] = config.get("Settings", "write_metadata")
         token = (data.get("auth_token") or "").strip()
         if token:
-            config.set("Settings", "auth_token", token)
-            os.environ["AUTH_TOKEN"] = token
             try:
                 write_auth_token(token)
             except OSError as exc:
                 logger.warning("Could not write header.txt: %s", exc)
+                return jsonify({"error": "Could not save the token."}), 500
+            os.environ["AUTH_TOKEN"] = token
+        elif config.has_option("Settings", "auth_token"):
+            existing = config.get("Settings", "auth_token", fallback="").strip()
+            if existing:
+                try:
+                    present = has_auth_token(read_headers_from_file("header.txt"))
+                except FileNotFoundError:
+                    present = False
+                if not present:
+                    try:
+                        write_auth_token(existing)
+                    except OSError as exc:
+                        logger.warning("Could not write header.txt: %s", exc)
+                        return jsonify({"error": "Could not save the token."}), 500
+        if config.has_option("Settings", "auth_token"):
+            config.remove_option("Settings", "auth_token")
         os.environ["FILENAME_PATTERN"] = config.get("Filename", "pattern")
         os.environ["FILENAME_SEPARATOR"] = config.get("Filename", "separator")
         os.environ["THREAD_COUNT"] = config.get("Threads", "threads")
@@ -338,9 +545,14 @@ def settings_api():
         pass
     settings.pop("auth_token", None)
     settings["auth_token_set"] = token_set
-    settings["ffmpeg_available"] = ffmpeg_available()
+    ffmpeg_ok = ffmpeg_available()
+    settings["ffmpeg_available"] = ffmpeg_ok
+    settings["ffmpeg_can_install"] = os.name == "nt" and not ffmpeg_ok
     return jsonify(settings)
 
 
 if __name__ == "__main__":
+    from scripts.settings_loader import migrate_token_out_of_config
+
+    migrate_token_out_of_config()
     app.run(host="0.0.0.0", port=5000)

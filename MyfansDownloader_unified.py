@@ -29,6 +29,9 @@ def run_cli_mode():
         choice = input("\nEnter your choice (1 or 2): ").strip()
         
         if choice == "1":
+            if not check_ffmpeg_installed():
+                print("FFmpeg is not installed. Please install FFmpeg to continue.")
+                return
             from scripts.myfans_dl import main as video_main
             print("\nRunning Download videos...\n")
             _run_cli_entry(video_main)
@@ -92,6 +95,11 @@ def run_web_mode():
         import traceback
         traceback.print_exc()
 
+def _web_requested(argv=None) -> bool:
+    args = sys.argv[1:] if argv is None else argv
+    return any(arg in {"web", "--web"} for arg in args)
+
+
 def main():
     """Main entry point"""
     # Check Python version
@@ -103,13 +111,14 @@ def main():
     if not install_requirements():
         print("Failed to install requirements")
         sys.exit(1)
-    
-    # Check FFmpeg
-    if not check_ffmpeg_installed():
-        print("FFmpeg is not installed. Please install FFmpeg to continue.")
-        sys.exit(1)
 
-    if any(arg in {"web", "--web"} for arg in sys.argv[1:]):
+    from scripts.settings_loader import migrate_token_out_of_config
+
+    migrate_token_out_of_config()
+
+    # The browser page opens even when FFmpeg is missing. Video downloads
+    # still ask to install it; the page offers that choice itself.
+    if _web_requested():
         run_web_mode()
         return
 
