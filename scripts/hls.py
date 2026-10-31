@@ -6,6 +6,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 import uuid
 from typing import Callable, Dict, List, Optional, Tuple
@@ -23,6 +24,56 @@ FFMPEG_DOWNLOAD_TIMEOUT = 4 * 60 * 60
 FFMPEG_REMUX_TIMEOUT = 30 * 60
 
 
+def _cancelled(cancel_event) -> bool:
+    return cancel_event is not None and cancel_event.is_set()
+
+
+def _remove_partial(path: str) -> None:
+    if path and os.path.exists(path):
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
+def _popen_until(cmd: List[str], cancel_event, poll_seconds: float = 0.3):
+    """Run a process until it exits. Return (-15, "") when cancel_event is set."""
+    try:
+        proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+    except FileNotFoundError:
+        return None, ""
+    chunks: List[str] = []
+
+    def _read() -> None:
+        if proc.stderr is None:
+            return
+        chunks.append(proc.stderr.read())
+
+    reader = threading.Thread(target=_read, daemon=True)
+    reader.start()
+    cancelled = False
+    while proc.poll() is None:
+        if _cancelled(cancel_event):
+            cancelled = True
+            proc.kill()
+            break
+        time.sleep(poll_seconds)
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait(timeout=5)
+    reader.join(timeout=2)
+    if proc.stderr is not None:
+        try:
+            proc.stderr.close()
+        except OSError:
+            pass
+    if cancelled:
+        return -15, ""
+    return proc.returncode, "".join(chunks)
+
+
 def _notify(progress: ProgressCb, message: str) -> None:
     logger.info(message)
     if progress:
@@ -38,7 +89,7 @@ def _ffmpeg_headers(headers: Dict[str, str]) -> str:
     return "\r\n".join(parts) + "\r\n"
 
 
-def ffmpeg_download(url: str, output_file: str, headers: Dict[str, str]) -> bool:
+def ffmpeg_download(url: str, output_file: str, headers: Dict[str, str], cancel_event=None) -> bool:
     os.makedirs(os.path.dirname(output_file) or ".", exist_ok=True)
     header_arg = _ffmpeg_headers(headers)
     user_agent = headers.get("user-agent") or headers.get("User-Agent") or "Mozilla/5.0"
@@ -79,33 +130,21 @@ def ffmpeg_download(url: str, output_file: str, headers: Dict[str, str]) -> bool
         ],
     ]
     for cmd in commands:
-        try:
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=FFMPEG_DOWNLOAD_TIMEOUT,
-            )
-        except FileNotFoundError:
+        if _cancelled(cancel_event):
+            _remove_partial(output_file)
+            return False
+        code, stderr = _popen_until(cmd, cancel_event)
+        if code is None:
             logger.error("ffmpeg is not installed or not on PATH")
             return False
-        except subprocess.TimeoutExpired:
-            logger.error("ffmpeg download timed out after %s seconds", FFMPEG_DOWNLOAD_TIMEOUT)
-            if os.path.exists(output_file):
-                try:
-                    os.remove(output_file)
-                except OSError:
-                    pass
-            continue
-        if result.returncode == 0 and verify_video_file(output_file):
+        if code == -15:
+            _remove_partial(output_file)
+            return False
+        if code == 0 and verify_video_file(output_file):
             return True
-        if result.stderr:
-            logger.warning("ffmpeg failed: %s", result.stderr.strip()[:500])
-        if os.path.exists(output_file):
-            try:
-                os.remove(output_file)
-            except OSError:
-                pass
+        if stderr:
+            logger.warning("ffmpeg failed: %s", stderr.strip()[:500])
+        _remove_partial(output_file)
     return False
 
 
@@ -185,6 +224,7 @@ def python_hls_download(
     requested_height: Optional[int] = None,
     progress: ProgressCb = None,
     max_workers: int = 8,
+    cancel_event=None,
 ) -> bool:
     import concurrent.futures
 
@@ -192,7 +232,7 @@ def python_hls_download(
     playlist, playlist_url = resolve_media_playlist(session, url, headers, requested_height)
     if _playlist_is_encrypted(playlist):
         _notify(progress, "Playlist is encrypted; using ffmpeg")
-        return ffmpeg_download(playlist_url, output_file, headers)
+        return ffmpeg_download(playlist_url, output_file, headers, cancel_event=cancel_event)
 
     output_folder = os.path.dirname(output_file) or "."
     temp_root = tempfile.mkdtemp(prefix=f"m3u8_{uuid.uuid4().hex[:8]}_", dir=output_folder)
@@ -216,7 +256,7 @@ def python_hls_download(
         results: List[Optional[str]] = [None] * total
 
         def download_one(index: int, segment: m3u8.Segment) -> Tuple[int, Optional[str]]:
-            if not segment.uri:
+            if _cancelled(cancel_event) or not segment.uri:
                 return index, None
             dest = os.path.join(temp_root, f"segment_{index:05d}.bin")
             if os.path.exists(dest) and os.path.getsize(dest) > 0:
@@ -239,16 +279,24 @@ def python_hls_download(
             return index, None
 
         workers = max(1, min(max_workers, total or 1))
-        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+        executor = concurrent.futures.ThreadPoolExecutor(max_workers=workers)
+        try:
             futures = [executor.submit(download_one, i, seg) for i, seg in enumerate(playlist.segments)]
             done = 0
             for future in concurrent.futures.as_completed(futures):
+                if _cancelled(cancel_event):
+                    break
                 index, path = future.result()
                 results[index] = path
                 done += 1
                 if done % 50 == 0 or done == total:
                     ok = len([item for item in results if item])
                     _notify(progress, f"Progress: {done}/{total} segments ({ok} ok)")
+        finally:
+            executor.shutdown(wait=True, cancel_futures=True)
+
+        if _cancelled(cancel_event):
+            return False
 
         valid = [path for path in results if path]
         if len(valid) != total:
@@ -290,6 +338,7 @@ def download_stream(
     progress: ProgressCb = None,
     max_retries: int = 3,
     segment_threads: int = 8,
+    cancel_event=None,
 ) -> bool:
     if not url:
         return False
@@ -304,10 +353,14 @@ def download_stream(
 
     last_error = None
     for attempt in range(max_retries):
+        if _cancelled(cancel_event):
+            return False
         try:
             _notify(progress, f"Downloading video {post_id} (attempt {attempt + 1}/{max_retries})")
-            if ffmpeg_download(url, output_file, headers):
+            if ffmpeg_download(url, output_file, headers, cancel_event=cancel_event):
                 return True
+            if _cancelled(cancel_event):
+                return False
             _notify(progress, "ffmpeg download failed, trying Python HLS downloader")
             if python_hls_download(
                 url,
@@ -317,8 +370,11 @@ def download_stream(
                 requested_height=requested_height,
                 progress=progress,
                 max_workers=segment_threads,
+                cancel_event=cancel_event,
             ):
                 return True
+            if _cancelled(cancel_event):
+                return False
         except Exception as exc:
             last_error = exc
             logger.error("Download attempt %s failed: %s", attempt + 1, exc)

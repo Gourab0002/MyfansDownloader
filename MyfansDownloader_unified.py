@@ -3,9 +3,11 @@
 Unified MyfansDownloader - Single Program
 Combines CLI and Web Interface
 """
+import socket
 import sys
-import webbrowser
+import threading
 import time
+import webbrowser
 from pathlib import Path
 
 # Add current directory to path to allow imports
@@ -47,32 +49,44 @@ def _run_cli_entry(fn):
         if exc.code not in (0, None):
             print(f"Stopped with exit code {exc.code}")
 
-def run_web_mode():
-    """Run the Flask web server"""
+def _port_open(port: int) -> bool:
     try:
-        print("\n" + "="*50)
-        print("MyfansDownloader - Web Mode")
-        print("="*50 + "\n")
-        
+        with socket.create_connection(("127.0.0.1", port), timeout=0.2):
+            return True
+    except OSError:
+        return False
+
+
+def run_web_mode():
+    """Run the local web app and open it in the browser once it is listening."""
+    try:
         from app import app
-        
+
         port = 5000
-        url = f"http://localhost:{port}"
-        
-        print(f"Starting web server on {url}")
-        print("Opening browser in 2 seconds...")
-        
-        # Open browser after a short delay
-        time.sleep(2)
-        try:
+        url = f"http://127.0.0.1:{port}"
+        if _port_open(port):
+            print(f"MyFans Downloader is already open at {url}")
             webbrowser.open(url)
-        except Exception as e:
-            print(f"Could not open browser automatically: {e}")
-            print(f"Please visit {url} manually")
-        
-        print("\nPress Ctrl+C to stop the server\n")
-        app.run(host='localhost', port=port, debug=False)
-        
+            return
+
+        def open_when_ready():
+            for _ in range(80):
+                if _port_open(port):
+                    try:
+                        webbrowser.open(url)
+                    except Exception as exc:
+                        print(f"Could not open the browser: {exc}")
+                        print(f"Visit {url}")
+                    return
+                time.sleep(0.1)
+            print(f"Visit {url}")
+
+        threading.Thread(target=open_when_ready, daemon=True).start()
+        print(f"MyFans Downloader is at {url}")
+        print("Close this window to stop it.")
+        app.run(host="127.0.0.1", port=port, debug=False, use_reloader=False)
+    except OSError as exc:
+        print(f"Could not start the server: {exc}")
     except Exception as e:
         print(f"Error in web mode: {e}")
         import traceback
@@ -94,7 +108,11 @@ def main():
     if not check_ffmpeg_installed():
         print("FFmpeg is not installed. Please install FFmpeg to continue.")
         sys.exit(1)
-    
+
+    if any(arg in {"web", "--web"} for arg in sys.argv[1:]):
+        run_web_mode()
+        return
+
     # Main menu
     while True:
         print("\n" + "="*50)

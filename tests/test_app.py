@@ -20,7 +20,73 @@ class FlaskRouteTests(unittest.TestCase):
     def test_index_ok(self):
         resp = self.client.get("/")
         self.assertEqual(resp.status_code, 200)
-        self.assertIn(b"Download Content", resp.data)
+        self.assertIn(b"Start download", resp.data)
+        self.assertIn(b"Activity", resp.data)
+        self.assertIn(b"app.css", resp.data)
+        self.assertIn(b"stopBtn", resp.data)
+        self.assertIn(b"previewCard", resp.data)
+
+    def test_preview_requires_target(self):
+        resp = self.client.post("/api/preview", json={})
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("error", resp.get_json())
+
+    def test_stop_is_idle_when_nothing_is_running(self):
+        import app as app_module
+
+        app_module.cancel_event.clear()
+        resp = self.client.post("/download/stop")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.get_json()["status"], "idle")
+        self.assertFalse(app_module.cancel_event.is_set())
+
+    def test_stop_sets_cancel_while_a_download_is_running(self):
+        import app as app_module
+
+        app_module.cancel_event.clear()
+        acquired = app_module.download_lock.acquire(blocking=False)
+        self.assertTrue(acquired)
+        try:
+            resp = self.client.post("/download/stop")
+            self.assertEqual(resp.get_json()["status"], "stopping")
+            self.assertTrue(app_module.cancel_event.is_set())
+        finally:
+            app_module.cancel_event.clear()
+            app_module.download_lock.release()
+
+    def test_open_folder_ignores_client_path(self):
+        import tempfile
+        from unittest.mock import patch
+
+        import app as app_module
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.object(app_module, "output_directory", return_value=tmp), patch.object(
+                app_module, "reveal_folder"
+            ) as reveal:
+                resp = self.client.post("/api/open-folder", json={"path": "C:/Windows/System32"})
+            self.assertEqual(resp.status_code, 200)
+            opened = Path(reveal.call_args[0][0]).resolve()
+            self.assertEqual(opened, Path(tmp).resolve())
+
+    def test_library_reads_download_folder_only(self):
+        import tempfile
+        from unittest.mock import patch
+
+        import app as app_module
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "clip.mp4").write_bytes(b"x")
+            (root / "note.txt").write_text("no", encoding="utf-8")
+            nested = root / "creator" / "videos"
+            nested.mkdir(parents=True)
+            (nested / "still.jpg").write_bytes(b"y")
+            with patch.object(app_module, "output_directory", return_value=str(root)):
+                resp = self.client.get("/api/library")
+            self.assertEqual(resp.status_code, 200)
+            names = {item["name"] for item in resp.get_json()["files"]}
+            self.assertEqual(names, {"clip.mp4", "still.jpg"})
 
     def test_settings_page_is_html_not_json(self):
         resp = self.client.get("/settings")

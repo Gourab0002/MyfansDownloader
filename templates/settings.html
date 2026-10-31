@@ -1,96 +1,47 @@
 {% extends "base.html" %}
+{% block page %}settings{% endblock %}
 
 {% block content %}
-<div class="container mt-4">
-    <div class="card">
-        <div class="card-body">
-            <h2 class="card-title mb-4">Settings</h2>
-            <form id="settingsForm">
-                <div class="row">
-                    <div class="col-md-6">
-                        <div class="form-group">
-                            <label for="filename_pattern" class="form-label">Filename Pattern</label>
-                            <input type="text" class="form-control" id="filename_pattern"
-                                   placeholder="e.g. {creator}_{date}_{id}">
-                            <small class="text-muted">Available variables: {creator}, {date}, {title}, {id}</small>
-                        </div>
-
-                        <div class="form-group">
-                            <label for="filename_separator" class="form-label">Filename Separator</label>
-                            <input type="text" class="form-control" id="filename_separator"
-                                   placeholder="_">
-                        </div>
-                    </div>
-
-                    <div class="col-md-6">
-                        <div class="form-group">
-                            <label for="auth_token" class="form-label">Auth Token</label>
-                            <input type="password" class="form-control" id="auth_token"
-                                   placeholder="Leave blank to keep the current token"
-                                   autocomplete="off">
-                        </div>
-
-                        <div class="form-group">
-                            <label for="thread_count" class="form-label">Download Threads</label>
-                            <input type="number" class="form-control" id="thread_count"
-                                   min="1" max="20">
-                        </div>
-
-                        <div class="form-check mt-3">
-                            <input class="form-check-input" type="checkbox" id="write_metadata">
-                            <label class="form-check-label" for="write_metadata">Write JSON metadata files</label>
-                        </div>
-                    </div>
-                </div>
-
-                <div class="form-group mt-3">
-                    <button type="submit" class="btn btn-primary">Save Settings</button>
-                </div>
-            </form>
-        </div>
+<form id="settingsForm" class="panel settings-form">
+    <div class="panel-head">
+        <h1>Settings</h1>
+        <p>The token stays on this computer. Leave the field blank to keep the one already saved.</p>
     </div>
-</div>
 
-<script>
-document.addEventListener('DOMContentLoaded', function() {
-    fetch('/api/settings')
-        .then(response => response.json())
-        .then(data => {
-            document.getElementById('filename_pattern').value = data.filename_pattern || '';
-            document.getElementById('filename_separator').value = data.filename_separator || '_';
-            document.getElementById('auth_token').value = '';
-            document.getElementById('auth_token').placeholder = data.auth_token_set
-                ? 'Token is set — leave blank to keep it'
-                : 'Token from _mfans_token cookie';
-            document.getElementById('thread_count').value = data.thread_count || 3;
-            const metadata = String(data.write_metadata || '0');
-            document.getElementById('write_metadata').checked = ['1', 'true', 'yes', 'on'].includes(metadata.toLowerCase());
-        });
+    <section>
+        <h2>Account</h2>
+        <label for="auth_token">MyFans token</label>
+        <input id="auth_token" type="password" autocomplete="off">
+        <p class="hint">On myfans.jp, open the site cookies and copy <code>_mfans_token</code>.</p>
+    </section>
 
-    document.getElementById('settingsForm').addEventListener('submit', function(e) {
-        e.preventDefault();
-        const settings = {
-            filename_pattern: document.getElementById('filename_pattern').value,
-            filename_separator: document.getElementById('filename_separator').value,
-            auth_token: document.getElementById('auth_token').value,
-            thread_count: parseInt(document.getElementById('thread_count').value, 10) || 3,
-            write_metadata: document.getElementById('write_metadata').checked
-        };
+    <section>
+        <h2>Files</h2>
+        <label for="output_dir">Save to</label>
+        <input id="output_dir" type="text" spellcheck="false">
 
-        fetch('/api/settings', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(settings)
-        })
-        .then(response => response.json())
-        .then(data => {
-            if (data.status === 'success') {
-                alert('Settings saved successfully!');
-            } else {
-                alert('Error saving settings: ' + (data.error || 'unknown error'));
-            }
-        });
-    });
-});
-</script>
+        <label for="filename_pattern">File name</label>
+        <input id="filename_pattern" type="text" spellcheck="false" placeholder="{creator}_{date}_{id}">
+        <p class="hint">Use {creator}, {date}, {title}, and {id}. Preview: <span id="namePreview"></span></p>
+
+        <label for="filename_separator">Separator</label>
+        <input id="filename_separator" type="text" maxlength="8" spellcheck="false">
+
+        <label class="check" for="write_metadata">
+            <input id="write_metadata" type="checkbox">
+            <span>Save a JSON note next to each file</span>
+        </label>
+    </section>
+
+    <section>
+        <h2>Speed</h2>
+        <label for="thread_count">Downloads at once</label>
+        <input id="thread_count" type="number" min="1" max="20">
+    </section>
+
+    <div class="save-row">
+        <button type="submit" class="primary" id="saveBtn">Save settings</button>
+        <p id="saveNote" class="hint" role="status"></p>
+    </div>
+</form>
 {% endblock %}

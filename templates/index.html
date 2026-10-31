@@ -1,181 +1,93 @@
 {% extends "base.html" %}
 
 {% block content %}
-<div class="card">
-    <div class="card-body">
-        <h2 class="card-title mb-4">Download Content</h2>
-        <form id="downloadForm">
-            <div class="row">
-                <div class="col-md-6">
-                    <div class="form-group">
-                        <label for="type" class="form-label">Content Type</label>
-                        <select id="type" class="form-select" onchange="updateFormOptions()">
-                            <option value="videos">Videos</option>
-                            <option value="images">Images</option>
-                        </select>
-                    </div>
+<div class="workspace">
+    <form id="downloadForm" class="panel">
+        <div class="panel-head">
+            <h1>Download</h1>
+            <p>Save videos and images your account can already open.</p>
+        </div>
 
-                    <div class="form-group">
-                        <label for="downloadType" class="form-label">Download Mode</label>
-                        <select id="downloadType" class="form-select" onchange="toggleInputs()">
-                            <option value="bulk">Download All Content</option>
-                            <option value="single">Download Single Item</option>
-                        </select>
-                    </div>
-
-                    <div class="form-group" id="resolutionGroup">
-                        <label for="resolution" class="form-label">Video Quality</label>
-                        <select id="resolution" name="resolution" class="form-select">
-                            <option value="best">Best Available</option>
-                            <option value="uhd">2160p (4K)</option>
-                            <option value="fhd">1080p (Full HD)</option>
-                            <option value="hd">720p (HD)</option>
-                            <option value="sd">480p (SD)</option>
-                            <option value="ld">360p (Low)</option>
-                        </select>
-                    </div>
-                </div>
-
-                <div class="col-md-6" id="bulkDownload">
-                    <div class="form-group">
-                        <label for="username" class="form-label">Username</label>
-                        <input type="text" class="form-control" id="username" placeholder="Enter username (without @)">
-                    </div>
-
-                    <div class="form-group">
-                        <label for="download_type" class="form-label">Content Filter</label>
-                        <select id="download_type" class="form-select">
-                            <option value="all">All Posts</option>
-                            <option value="free">Free Posts Only</option>
-                            <option value="subscribed">Subscribed Posts Only</option>
-                        </select>
-                    </div>
-                </div>
-
-                <div class="col-md-6 hidden" id="singleDownload">
-                    <div class="form-group">
-                        <label for="postId" class="form-label">Post ID</label>
-                        <input type="text" class="form-control" id="postId" placeholder="Enter post ID">
-                    </div>
-                </div>
+        <fieldset>
+            <legend>What to save</legend>
+            <div class="segment" id="kind" role="radiogroup" aria-label="What to save">
+                <button type="button" data-value="videos" aria-checked="true">Videos</button>
+                <button type="button" data-value="images" aria-checked="false">Images</button>
             </div>
+        </fieldset>
 
-            <div class="form-group mt-3">
-                <button type="submit" class="btn btn-primary" id="startBtn">Start Download</button>
+        <fieldset>
+            <legend>From</legend>
+            <div class="segment" id="target" role="radiogroup" aria-label="From">
+                <button type="button" data-value="creator" aria-checked="true">A creator</button>
+                <button type="button" data-value="post" aria-checked="false">One post</button>
             </div>
-        </form>
-    </div>
+        </fieldset>
+
+        <div class="stack" id="creatorFields">
+            <label class="field-label" for="username">Creator name</label>
+            <input id="username" type="text" autocomplete="off" spellcheck="false" placeholder="name, without the @">
+            <div class="segment" id="filter" role="radiogroup" aria-label="Which posts">
+                <button type="button" data-value="all" aria-checked="true">All</button>
+                <button type="button" data-value="free" aria-checked="false">Free</button>
+                <button type="button" data-value="subscribed" aria-checked="false">Subscribed</button>
+            </div>
+        </div>
+
+        <div class="stack" id="postFields" hidden>
+            <label class="field-label" for="postId">Post link or ID</label>
+            <input id="postId" type="text" autocomplete="off" spellcheck="false" placeholder="Paste a post link or ID">
+        </div>
+
+        <div class="stack" id="qualityFields">
+            <span class="field-label" id="qualityLabel">Quality</span>
+            <div class="segment wrap" id="quality" role="radiogroup" aria-labelledby="qualityLabel">
+                <button type="button" data-value="best" aria-checked="true">Best</button>
+                <button type="button" data-value="uhd" aria-checked="false">4K</button>
+                <button type="button" data-value="fhd" aria-checked="false">1080p</button>
+                <button type="button" data-value="hd" aria-checked="false">720p</button>
+                <button type="button" data-value="sd" aria-checked="false">480p</button>
+                <button type="button" data-value="ld" aria-checked="false">360p</button>
+            </div>
+            <p class="hint">If that size is missing, the closest available one is used.</p>
+        </div>
+
+        <p id="formError" class="form-error" hidden></p>
+        <button type="submit" class="primary" id="startBtn">Start download</button>
+        <button type="button" class="stop" id="stopBtn" hidden>Stop</button>
+        <div id="previewCard" class="preview" hidden>
+            <p id="previewText"></p>
+            <div class="preview-actions">
+                <button type="button" class="primary" id="confirmBtn">Download</button>
+                <button type="button" class="ghost" id="previewBack">Back</button>
+            </div>
+        </div>
+        <p class="hint">Files go to <span id="savePath">downloads</span></p>
+        <p class="hint" id="tokenHint" hidden>Paid posts need a token. Add it in Settings.</p>
+        <p class="hint" id="ffmpegNote" hidden>FFmpeg is not available, so videos cannot be saved yet.</p>
+    </form>
+
+    <section class="panel activity" aria-labelledby="activityTitle">
+        <div class="panel-head row">
+            <div>
+                <h2 id="activityTitle">Activity</h2>
+                <p id="historyNote"></p>
+            </div>
+            <span class="state" id="jobState" data-state="idle">Idle</span>
+        </div>
+        <div id="jobProgress" class="job-progress" hidden>
+            <div class="bar" aria-hidden="true"><span id="jobBar"></span></div>
+            <p id="jobCount" aria-live="polite"></p>
+        </div>
+        <div id="log" class="log" aria-live="polite"></div>
+    </section>
 </div>
 
-<div id="progress" class="progress-log mt-4"></div>
-
-<script>
-    let eventSource = null;
-
-    function updateFormOptions() {
-        const contentType = document.getElementById('type').value;
-        const downloadTypeSelect = document.getElementById('downloadType');
-        downloadTypeSelect.options[0].text = contentType === 'videos' ? 'Download All Videos' : 'Download All Images';
-        downloadTypeSelect.options[1].text = contentType === 'videos' ? 'Download Single Video' : 'Download Single Image';
-        document.getElementById('resolutionGroup').classList.toggle('hidden', contentType !== 'videos');
-    }
-
-    function toggleInputs() {
-        const downloadType = document.getElementById('downloadType').value;
-        document.getElementById('bulkDownload').classList.toggle('hidden', downloadType === 'single');
-        document.getElementById('singleDownload').classList.toggle('hidden', downloadType === 'bulk');
-    }
-
-    function appendLog(text) {
-        const progress = document.getElementById('progress');
-        const timestamp = new Date().toLocaleTimeString();
-        progress.innerHTML += `[${timestamp}] ${text}<br>`;
-        progress.scrollTop = progress.scrollHeight;
-    }
-
-    document.getElementById('downloadForm').onsubmit = async (e) => {
-        e.preventDefault();
-        const startBtn = document.getElementById('startBtn');
-        document.getElementById('progress').innerHTML = '';
-        if (eventSource) {
-            eventSource.close();
-            eventSource = null;
-        }
-
-        const downloadType = document.getElementById('downloadType').value;
-        const data = downloadType === 'bulk' ? {
-            username: document.getElementById('username').value.trim(),
-            type: document.getElementById('type').value,
-            download_type: document.getElementById('download_type').value,
-            resolution: document.getElementById('resolution').value
-        } : {
-            post_id: document.getElementById('postId').value.trim(),
-            type: document.getElementById('type').value,
-            download_type: 'single',
-            resolution: document.getElementById('resolution').value
-        };
-
-        if (downloadType === 'bulk' && !data.username) {
-            appendLog('Username is required');
-            return;
-        }
-        if (downloadType === 'single' && !data.post_id) {
-            appendLog('Post ID is required');
-            return;
-        }
-
-        startBtn.disabled = true;
-        let response;
-        try {
-            response = await fetch('/download', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(data)
-            });
-        } catch (err) {
-            appendLog('Could not reach the download server');
-            startBtn.disabled = false;
-            return;
-        }
-        if (!response.ok) {
-            const error = await response.json().catch(() => ({ error: response.statusText }));
-            appendLog(error.error || 'Failed to start download');
-            startBtn.disabled = false;
-            return;
-        }
-
-        eventSource = new EventSource('/progress');
-        eventSource.onmessage = (event) => {
-            appendLog(event.data);
-            if (event.data === 'DONE') {
-                eventSource.close();
-                eventSource = null;
-                startBtn.disabled = false;
-            }
-        };
-        eventSource.onerror = () => {
-            if (eventSource) {
-                eventSource.close();
-                eventSource = null;
-            }
-            startBtn.disabled = false;
-        };
-    };
-
-    document.addEventListener('DOMContentLoaded', () => {
-        updateFormOptions();
-        loadStatus();
-    });
-
-    async function loadStatus() {
-        const response = await fetch('/status');
-        const status = await response.json();
-        Object.entries(status.downloads || {}).forEach(([post_id, info]) => {
-            const timestamp = info.last_updated ? new Date(info.last_updated).toLocaleTimeString() : '';
-            const progressText = info.segments_total ?
-                `(${info.segments_downloaded}/${info.segments_total} segments)` : '';
-            appendLog(`Post ${post_id}: ${info.status} ${progressText}`.trim());
-        });
-    }
-</script>
+<section class="panel library" aria-labelledby="libraryTitle">
+    <div class="panel-head">
+        <h2 id="libraryTitle">Library</h2>
+        <button type="button" class="text" id="refreshLibrary">Refresh</button>
+    </div>
+    <ul id="libraryList" class="library-list"></ul>
+</section>
 {% endblock %}
